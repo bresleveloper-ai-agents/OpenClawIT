@@ -1,3 +1,5 @@
+# WHATSAPP
+
 after connecting the whatsapp channel the default should be all messages to main agent.
 
 BUT sometimes we want our OPENCLAW INSTANCE to be connected to device X with number Y, and let multiple people to chat from their devices with number Y, each talking to another agent.
@@ -35,3 +37,24 @@ that is why we need bindings like that. note that in this example agent `wa-list
     }
   ],
 ```
+
+
+
+# Telegram
+
+**per agent**
+
+
+Log into Telegram on Phone 1, find @BotFather, run /newbot, and copy Token 1.
+
+
+```
+openclaw config set channels.telegram.accounts.my-agent-bot.botToken "TOKEN"
+openclaw agents bind --agent my-agent telegram:my-agent-bot
+openclaw gateway restart
+openclaw pairing approve telegram CODE_FROM_PHONE_1 --account my-agent-bot
+```
+
+my-agent and my-agent-bot are free strings names.
+
+
