@@ -47,12 +47,17 @@ that is why we need bindings like that. note that in this example agent `wa-list
 
 Log into Telegram on Phone 1, find @BotFather, run /newbot, and copy Token 1.
 
+will be like "8...01:AAG....s8_vKY"
 
 ```
+// define bot in openclaw settings
 openclaw config set channels.telegram.accounts.my-agent-bot.botToken "TOKEN"
-openclaw agents bind --agent my-agent telegram:my-agent-bot
+// restart gateway for changes to take affect
 openclaw gateway restart
-openclaw pairing approve telegram CODE_FROM_PHONE_1 --account my-agent-bot
+// bind THAT telegram bot to THIS agent 
+openclaw agents bind --agent my-agent --bind telegram:my-agent-bot
+// say "hi" to bot and you will get the full cli command like this
+openclaw pairing approve telegram CODE_FROM_PHONE_1
 ```
 
 my-agent and my-agent-bot are free strings names.
