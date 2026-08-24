@@ -62,4 +62,38 @@ openclaw pairing approve telegram CODE_FROM_PHONE_1
 
 my-agent and my-agent-bot are free strings names.
 
+bindings for multi telegram agents:
+```
+    "channels": {
+        "telegram": {
+            "accounts": {
+                "my_telegram_agent_1_bot": {
+                    "botToken": "1234:abcd"
+                },
+                "my_telegram_agent_2_bot": {
+                    "botToken": "12345:abcde"
+                }
+            }
+        }
+    },
+    "bindings": [
+        {
+            "type": "route",
+            "agentId": "my-agent-1",
+            "match": {
+                "channel": "telegram",
+                "accountId": "my_telegram_agent_1_bot"
+            }
+        },
+        {
+            "type": "route",
+            "agentId": "my-agent-1",
+            "match": {
+                "channel": "telegram",
+                "accountId": "my_telegram_agent_2_bot"
+            }
+        }
+    ],
+```
+
 
