@@ -40,6 +40,10 @@ Move into multi-agent setups and bot-to-bot conversations in Discord.
 **7. [OpenClaw Troubleshooting Guide](openclaw-troubleshoot.md)**  
 When something breaks, acts weird, or catches fire spiritually, this is the repair manual.
 
+**8. [Learn 03 - Sandboxing and managing multi agents](Learn%2003%20-%20SANDBOXING%20and%20managing%20multiple%20agents.md)**  
+time to make OpenClaw to what it meant to be, a real multi agents platform, with or without multi humans, and elevating (and limiting) each agent
+
+
 ---
 
 *Built with 🦞 by Jarvis de la Ari & Ariel @ Bresleveloper AI*
