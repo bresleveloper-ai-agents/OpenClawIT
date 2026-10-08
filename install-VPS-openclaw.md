@@ -59,6 +59,12 @@ openclaw gateway restart
 openclaw tui --session main
 ```
 
+if you want smarter agents 
+```
+openclaw config set agents.defaults.thinkingDefault "max"
+openclaw config set agents.defaults.reasoningDefault "on"
+```
+
 
 that will enable for your main agent to be able to do anything. `"profile": "full",` means the agent is allowed to use the `exec` tool, the tool for shell commands, and `"elevated"` is another gate for those. 
 
