@@ -278,22 +278,6 @@ aa-complain /etc/apparmor.d/* 2>/dev/null
 aa-enforce /etc/apparmor.d/* 2>/dev/null
 ```
 
----
-
-## 8. File Integrity Monitoring (AIDE)
-
-```bash
-apt install -y aide
-
-# Initialize baseline database
-aideinit
-cp /var/lib/aide/aide.db.new /var/lib/aide/aide.db
-
-# Daily check cron
-cat > /etc/cron.d/aide-check << 'EOF'
-0 4 * * * root /usr/bin/aide --config /etc/aide/aide.conf --check 2>&1 | head -50
-EOF
-```
 
 ---
 
@@ -602,10 +586,6 @@ echo "Security audit email test from $(hostname)" | mail -s "Test - Security Aud
 Once email works, update all monitoring scripts to send alerts via email:
 
 ```bash
-# AIDE daily check — email on changes
-cat > /etc/cron.d/aide-check << 'EOF'
-0 4 * * * root OUTPUT=$(/usr/bin/aide --config /etc/aide/aide.conf --check 2>&1); if [ $? -ne 0 ]; then echo "$OUTPUT" | mail -s "⚠️ AIDE File Changes - $(hostname)" root; fi
-EOF
 
 # rkhunter — email on warnings
 cat > /usr/local/bin/rkhunter-check.sh << 'SCRIPT'
@@ -806,7 +786,6 @@ echo "=============================="
 | Updates | Auto security patches daily |
 | Kernel | SYN cookies, no redirects, no source routing, hidden pointers |
 | Services | Unnecessary services disabled, kernel modules blacklisted |
-| Integrity | AIDE daily file checks, debsums package verification |
 | Rootkits | rkhunter + chkrootkit daily scans |
 | Network | psad port scan detection, UFW logging |
 | TLS | 1.2+ minimum everywhere, security headers on Nginx |
