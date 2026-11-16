@@ -58,15 +58,17 @@ DebianBanner no
 EOF
 ```
 
-If using systemd socket (Ubuntu 22.04+):
+If SSH uses systemd socket activation (Ubuntu 22.10+, `ssh.socket` enabled), switch to the classic `ssh.service`
+daemon, which reads `Port` from the file above. Don't override `ListenStream` instead: Ubuntu's `ssh.socket` sets
+`BindIPv6Only=ipv6-only`, so `ListenStream=$SSH_PORT` binds **IPv6 only** and IPv4 clients can't connect
+(see the troubleshoot log below):
 ```bash
-mkdir -p /etc/systemd/system/ssh.socket.d
-cat > /etc/systemd/system/ssh.socket.d/override.conf << EOF
-[Socket]
-ListenStream=
-ListenStream=$SSH_PORT
-EOF
-systemctl daemon-reload
+if systemctl is-enabled ssh.socket >/dev/null 2>&1; then
+  systemctl disable --now ssh.socket
+  rm -f /etc/systemd/system/ssh.socket.d/override.conf
+  systemctl daemon-reload
+  systemctl enable ssh.service
+fi
 ```
 
 Fix any conflicting configs:
@@ -74,11 +76,16 @@ Fix any conflicting configs:
 # Ensure no other file overrides PasswordAuthentication
 sed -i 's/^PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config.d/*.conf 2>/dev/null
 sed -i 's/^PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config 2>/dev/null
+
+# Some VPS images put "PermitRootLogin yes" in the main file. sshd already uses the value above (files in
+# sshd_config.d are read first and the first value wins), but rkhunter and lynis read only the main file.
+sed -i -E 's/^PermitRootLogin[[:space:]]+yes/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config
 ```
 
-Restart SSH:
+Validate, then restart SSH (a config error here would stop sshd from starting again):
 ```bash
-systemctl restart ssh
+/usr/sbin/sshd -t && systemctl restart ssh
+ss -tlnp | grep sshd    # expect 0.0.0.0:$SSH_PORT AND [::]:$SSH_PORT
 ```
 
 ### troubleshoot
@@ -107,12 +114,23 @@ systemctl restart ssh
 ```bash
 apt install -y fail2ban
 
+# Never ban yourself: the §13 permaban jail rescans a full YEAR of logs with maxretry = 1, so any earlier
+# typo / wrong key from your own IP bans you forever the moment it starts. Whitelist the IP you're on now
+# (update it if your IP changes; a ban is lifted with: fail2ban-client set <jail> unbanip <ip>).
+ADMIN_IP=$(echo "${SSH_CLIENT:-}" | awk '{print $1}')   # empty if you're not connected over SSH
+
+# backend = systemd reads the journal: works with or without rsyslog (Debian 12+ has no
+# /var/log/auth.log by default). journalmatch also covers OpenSSH >= 9.8, which logs as "sshd-session".
 cat > /etc/fail2ban/jail.local << EOF
+[DEFAULT]
+ignoreip = 127.0.0.1/8 ::1 $ADMIN_IP
+
 [sshd]
 enabled = true
 port = $SSH_PORT
 filter = sshd
-logpath = /var/log/auth.log
+backend = systemd
+journalmatch = _SYSTEMD_UNIT=ssh.service + _SYSTEMD_UNIT=sshd.service + _COMM=sshd + _COMM=sshd-session
 maxretry = 3
 bantime = 86400
 findtime = 600
@@ -217,6 +235,10 @@ fs.suid_dumpable = 0
 EOF
 
 sysctl --system
+
+# ufw re-applies /etc/ufw/sysctl.conf at boot, AFTER systemd-sysctl, and that file sets log_martians=0.
+# Align it, or the martian logging above is silently undone on every reboot:
+[ -f /etc/ufw/sysctl.conf ] && sed -i -E 's#^(net/ipv4/conf/(all|default)/log_martians)=0#\1=1#' /etc/ufw/sysctl.conf
 ```
 
 ---
@@ -224,10 +246,15 @@ sysctl --system
 ## 5. Disable Core Dumps
 
 ```bash
-echo 'kernel.core_pattern = |/bin/false' >> /etc/sysctl.d/99-security.conf
+grep -q '^kernel.core_pattern' /etc/sysctl.d/99-security.conf || echo 'kernel.core_pattern = |/bin/false' >> /etc/sysctl.d/99-security.conf
 sysctl --system
 
-echo '* hard core 0' >> /etc/security/limits.conf
+# "*" entries never apply to root, and systemd may ship limits.d/10-coredump-debian.conf with
+# "root hard core infinity" (limits.d is read after limits.conf), so use a later limits.d file:
+cat > /etc/security/limits.d/99-disable-coredumps.conf << 'EOF'
+*       hard    core    0
+root    hard    core    0
+EOF
 ```
 
 ---
@@ -273,9 +300,14 @@ EOF
 # Check status
 aa-status
 
-# Move any complain profiles to enforce
-aa-complain /etc/apparmor.d/* 2>/dev/null
-aa-enforce /etc/apparmor.d/* 2>/dev/null
+# aa-enforce comes from apparmor-utils, which Ubuntu doesn't install by default
+apt install -y apparmor-utils
+
+# Move any complain profiles to enforce, and only those. Don't run aa-complain/aa-enforce on all of
+# /etc/apparmor.d: Ubuntu 24.04+ ships ~70 "flags=(unconfined)" profiles (busybox, unshare, browsers...)
+# that exist only to allow user namespaces; forcing them into enforce mode breaks those programs.
+for f in $(grep -lE 'flags=\([^)]*complain' /etc/apparmor.d/* 2>/dev/null); do aa-enforce "$f"; done
+aa-status | grep 'profiles are'
 ```
 
 
@@ -284,19 +316,57 @@ aa-enforce /etc/apparmor.d/* 2>/dev/null
 ## 9. Rootkit Detection
 
 ```bash
-apt install -y rkhunter chkrootkit
+apt install -y rkhunter chkrootkit debsums
+
+# Fix rkhunter config FIRST (Debian/Ubuntu disable its downloads), then update.
+# Depending on the release WEB_CMD is quoted or not ("WEB_CMD=/bin/false" on Ubuntu 26.04):
+sed -i -E 's|^WEB_CMD="?/bin/false"?|WEB_CMD=""|; s|^UPDATE_MIRRORS=0|UPDATE_MIRRORS=1|; s|^MIRRORS_MODE=1|MIRRORS_MODE=0|' /etc/rkhunter.conf
+# Match "PermitRootLogin prohibit-password" from §1 (rkhunter's default "no" = a warning every day)
+sed -i '/^ALLOW_SSH_ROOT_USER=/d' /etc/rkhunter.conf && echo 'ALLOW_SSH_ROOT_USER=prohibit-password' >> /etc/rkhunter.conf
+# Benign hidden files that systemd leaves in /etc on cloud images
+for f in /etc/.updated /etc/.resolv.conf.systemd-resolved.bak; do
+  [ -e "$f" ] && ! grep -qx "ALLOWHIDDENFILE=$f" /etc/rkhunter.conf && echo "ALLOWHIDDENFILE=$f" >> /etc/rkhunter.conf
+done
+# Re-baseline file properties after every apt run, or auto-updates (§3) cause daily false warnings
+sed -i 's/^APT_AUTOGEN=.*/APT_AUTOGEN="true"/' /etc/default/rkhunter
 
 # Update rkhunter database
 rkhunter --update
 rkhunter --propupd
 
-# Fix rkhunter config (common issue)
-sed -i 's|^WEB_CMD="/bin/false"|WEB_CMD=""|' /etc/rkhunter.conf 2>/dev/null
+# The crons below replace the distro's own daily chkrootkit job (enabled by default on Ubuntu 26.04)
+sed -i 's/^RUN_DAILY=.*/RUN_DAILY="false"/' /etc/chkrootkit/chkrootkit.conf 2>/dev/null
+
+# chkrootkit prints "not infected" for every clean check, so "grep -i infected" fires on every run:
+# match the uppercase word INFECTED only. On Ubuntu 25.10+/26.04 the rust-coreutils multi-call binary
+# contains the string "bash", which chkrootkit's generic signature matches, so basename/date/dirname/
+# echo/env show up as INFECTED. This helper drops those lines ONLY while the command still resolves to a
+# rust-coreutils file AND debsums says the package is unmodified; everything else is printed.
+cat > /usr/local/bin/chkrootkit-infected << 'SCRIPT'
+#!/bin/bash
+# Prints only REAL "INFECTED" lines; full chkrootkit output -> /var/log/chkrootkit-last.log
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+OUT=$(chkrootkit 2>&1)
+printf '%s\n' "$OUT" > /var/log/chkrootkit-last.log; chmod 600 /var/log/chkrootkit-last.log
+PRISTINE=""
+dpkg -s rust-coreutils >/dev/null 2>&1 && [ -z "$(debsums -s rust-coreutils 2>&1)" ] && PRISTINE=1
+printf '%s\n' "$OUT" | grep -w "INFECTED" | while IFS= read -r line; do
+  cmd=$(printf '%s\n' "$line" | sed -nE "s/^Checking \`([^']+)'.*/\1/p")
+  real=$(readlink -f "/usr/bin/$cmd" 2>/dev/null)
+  pkg=$(dpkg -S "$real" 2>/dev/null | head -1 | cut -d: -f1)
+  if [ -n "$PRISTINE" ] && [ -n "$cmd" ] && [ "$pkg" = "rust-coreutils" ]; then
+    logger -t chkrootkit "suppressed known false positive: $cmd -> $real (rust-coreutils, debsums clean)"
+  else
+    printf '%s\n' "$line"
+  fi
+done
+SCRIPT
+chmod 755 /usr/local/bin/chkrootkit-infected
 
 # Daily crons
 cat > /etc/cron.d/rootkit-checks << 'EOF'
 0 3 * * * root /usr/bin/rkhunter --check --skip-keypress --quiet 2>&1 | grep -i warning
-30 3 * * * root /usr/sbin/chkrootkit 2>&1 | grep -i infected
+30 3 * * * root /usr/local/bin/chkrootkit-infected
 EOF
 ```
 
@@ -305,10 +375,20 @@ EOF
 ## 10. Port Scan Detection (psad)
 
 ```bash
+# psad hard-depends on a mail transport agent; with none installed apt pulls in postfix (an SMTP daemon).
+# Unless you'll set up email alerts (§16 Option C installs msmtp-mta), install the listener-less dma first:
+DEBIAN_FRONTEND=noninteractive apt install -y dma
 apt install -y psad
 
 # Enable logging for UFW
 ufw logging on
+
+# psad's default IPT_SYSLOG_FILE (/var/log/messages) doesn't exist on Debian/Ubuntu, so it would see
+# nothing. ufw's rsyslog rule writes firewall logs to /var/log/ufw.log:
+touch /var/log/ufw.log && chown syslog:adm /var/log/ufw.log 2>/dev/null
+sed -i -E "s#^(HOSTNAME)[[:space:]]+[^;]*;#\1    $(hostname);#; s#^(IPT_SYSLOG_FILE)[[:space:]]+[^;]*;#\1    /var/log/ufw.log;#" /etc/psad/psad.conf
+# No email configured? Stop psad mailing root on every scan:
+sed -i -E 's#^(ALERTING_METHODS)[[:space:]]+[^;]*;#\1    noemail;#' /etc/psad/psad.conf
 
 systemctl enable psad
 systemctl restart psad
@@ -350,17 +430,23 @@ Tell the AI: scan for any config files containing passwords, API keys, or tokens
 Since the server is key-only, ANY password attempt is hostile. Ban on first try, forever.
 
 ```bash
+# OpenSSH >= 9.8 (Ubuntu 24.10+/26.04, Debian 13) logs from "sshd-session[pid]" (10.x may also use
+# "sshd-auth"); a plain "sshd\[" never matches those lines, so the jail would silently do nothing.
 cat > /etc/fail2ban/filter.d/sshd-password.conf << 'EOF'
 [Definition]
-failregex = ^.*sshd\[.*\]: Connection closed by authenticating user .* <HOST> port .* \[preauth\]$
-            ^.*sshd\[.*\]: Disconnected from authenticating user .* <HOST> port .* \[preauth\]$
-            ^.*sshd\[.*\]: Failed password for .* from <HOST> port .*$
-            ^.*sshd\[.*\]: Failed password for invalid user .* from <HOST> port .*$
-            ^.*sshd\[.*\]: Connection closed by invalid user .* <HOST> port .*$
-            ^.*sshd\[.*\]: Invalid user .* from <HOST> port .*$
-            ^.*sshd\[.*\]: User .* from <HOST> not allowed because not listed in AllowUsers$
-            ^.*sshd\[.*\]: Disconnected from invalid user .* <HOST> port .* \[preauth\]$
+_daemon = sshd(?:-session|-auth)?
+failregex = ^.*%(_daemon)s\[\d+\]: Connection closed by authenticating user .* <HOST> port .* \[preauth\]$
+            ^.*%(_daemon)s\[\d+\]: Disconnected from authenticating user .* <HOST> port .* \[preauth\]$
+            ^.*%(_daemon)s\[\d+\]: Failed password for .* from <HOST> port .*$
+            ^.*%(_daemon)s\[\d+\]: Failed password for invalid user .* from <HOST> port .*$
+            ^.*%(_daemon)s\[\d+\]: Connection closed by invalid user .* <HOST> port .*$
+            ^.*%(_daemon)s\[\d+\]: Invalid user .* from <HOST> port .*$
+            ^.*%(_daemon)s\[\d+\]: User .* from <HOST> not allowed because not listed in AllowUsers$
+            ^.*%(_daemon)s\[\d+\]: Disconnected from invalid user .* <HOST> port .* \[preauth\]$
 ignoreregex =
+
+[Init]
+journalmatch = _SYSTEMD_UNIT=ssh.service + _SYSTEMD_UNIT=sshd.service + _COMM=sshd + _COMM=sshd-session
 EOF
 
 cat >> /etc/fail2ban/jail.local << EOF
@@ -369,7 +455,7 @@ cat >> /etc/fail2ban/jail.local << EOF
 enabled = true
 port = $SSH_PORT
 filter = sshd-password
-logpath = /var/log/auth.log
+backend = systemd
 maxretry = 1
 bantime = -1
 findtime = 31536000
@@ -381,6 +467,12 @@ fail2ban-client reload
 Verify — check if any IPs were already caught from historical logs:
 ```bash
 fail2ban-client status sshd-password-attempt
+```
+
+If "Total failed" stays 0 on a box that has seen attacks, the filter doesn't match your sshd log format. Test it
+(on systems with rsyslog):
+```bash
+fail2ban-regex /var/log/auth.log /etc/fail2ban/filter.d/sshd-password.conf | grep -E '^(Lines|Failregex):'
 ```
 
 ---
@@ -432,8 +524,10 @@ nginx -t && systemctl reload nginx
 ## 15. Harden Umask & Clean Up
 
 ```bash
-# Set stricter default umask
+# Set stricter default umask (Ubuntu 26.04's login.defs has no UMASK line at all, so add one;
+# pam_umask in common-session reads it)
 sed -i 's/^UMASK.*022/UMASK\t\t027/' /etc/login.defs
+grep -q '^UMASK' /etc/login.defs || printf 'UMASK\t\t027\n' >> /etc/login.defs
 
 # Purge leftover package configs
 dpkg --purge $(dpkg -l | awk '/^rc/ {print $2}') 2>/dev/null
@@ -558,7 +652,7 @@ rkhunter --check --skip-keypress --quiet --no-colors 2>&1 | tail -5
 echo ""
 
 echo "--- chkrootkit ---"
-chkrootkit 2>&1 | grep -i "infected" || echo "No infections found"
+/usr/local/bin/chkrootkit-infected | grep . || echo "No infections found"
 echo ""
 
 } > "$REPORT" 2>&1
@@ -600,9 +694,10 @@ chmod 755 /usr/local/bin/rkhunter-check.sh
 # chkrootkit — email on INFECTED
 cat > /usr/local/bin/chkrootkit-check.sh << 'SCRIPT'
 #!/bin/bash
-OUTPUT=$(/usr/sbin/chkrootkit 2>&1)
-if echo "$OUTPUT" | grep -qi "infected"; then
-  echo "$OUTPUT" | mail -s "🚨 chkrootkit INFECTED - $(hostname)" root
+# real INFECTED lines only (see §9); full output in /var/log/chkrootkit-last.log
+OUTPUT=$(/usr/local/bin/chkrootkit-infected)
+if [ -n "$OUTPUT" ]; then
+  printf '%s\n\nFull output: /var/log/chkrootkit-last.log\n' "$OUTPUT" | mail -s "🚨 chkrootkit INFECTED - $(hostname)" root
 fi
 SCRIPT
 chmod 755 /usr/local/bin/chkrootkit-check.sh
@@ -634,7 +729,8 @@ Monitor `/var/log/auth.log` every 5 minutes for suspicious activity.
 ```bash
 cat > /usr/local/bin/auth-monitor.sh << 'SCRIPT'
 #!/bin/bash
-STATE_FILE="/var/run/auth-monitor-pos"
+# not /var/run: it's wiped at boot, so every reboot re-read (and re-alerted on) the whole log
+STATE_FILE="/var/lib/auth-monitor-pos"
 LOG="/var/log/auth.log"
 
 # Get last position
@@ -658,6 +754,9 @@ fi
 SCRIPT
 
 chmod +x /usr/local/bin/auth-monitor.sh
+
+# Start from "now" — otherwise the first run alerts on the whole existing log (e.g. today's apt installs)
+stat -c%s /var/log/auth.log > /var/lib/auth-monitor-pos 2>/dev/null
 
 cat > /etc/cron.d/auth-monitor << 'EOF'
 */5 * * * * root /usr/local/bin/auth-monitor.sh 2>&1 | logger -t auth-monitor
@@ -761,11 +860,12 @@ rkhunter --check --skip-keypress --quiet --no-colors 2>&1 | tail -5
 echo ""
 
 echo "--- chkrootkit ---"
-chkrootkit 2>&1 | grep -i "infected" || echo "No infections found"
+/usr/local/bin/chkrootkit-infected | grep . || echo "No infections found"
 echo ""
 
 echo "--- debsums ---"
-debsums -s 2>&1 | head -10 || echo "All packages verified"
+# rkhunter --update rewrites its own data files under /var/lib/rkhunter/db: expected, not tampering
+DS=$(debsums -s 2>&1 | grep -v '/var/lib/rkhunter/db/' | head -10); [ -n "$DS" ] && echo "$DS" || echo "All packages verified"
 echo ""
 
 echo "=============================="
