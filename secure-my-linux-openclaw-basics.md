@@ -142,19 +142,19 @@ systemctl restart fail2ban
 
 ---
 
-## 2. Firewall — Close EVERYTHING Except 443 + SSH
+## 2. Firewall — Close EVERYTHING Except SSH
 
 ```bash
 ufw --force reset
 ufw default deny incoming
 ufw default allow outgoing
 ufw allow $SSH_PORT/tcp comment 'SSH'
-ufw allow 443/tcp comment 'HTTPS'
 ufw --force enable
 ufw status verbose
 ```
 
-**That's it. Only 443 and your SSH port are open. Everything else is blocked.**
+**That's it. Only your SSH port is open. Everything else is blocked.**
+
 
 If you need additional ports later, explicitly allow them:
 ```bash
@@ -880,7 +880,7 @@ echo "=============================="
 | Layer | Protection |
 |-------|-----------|
 | SSH | Non-standard port, key-only, no passwords, strong crypto, rate limiting |
-| Firewall | ALL ports closed except 443 + SSH — deny by default |
+| Firewall | ALL ports closed except SSH — deny by default |
 | Brute force | Fail2ban (24h ban after 3 fails) + instant permaban on password attempts |
 | File perms | Sensitive files locked to owner-only (600), .env, keys, credentials |
 | Updates | Auto security patches daily |
